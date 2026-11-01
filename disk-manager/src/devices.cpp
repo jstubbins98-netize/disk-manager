@@ -38,7 +38,14 @@ void flatten(const QJsonObject &o, const QString &disk, bool external, QVector<D
     d.serial = o["serial"].toString(); d.type = o["type"].toString();
     d.size = integer(o["size"]); d.readOnly = flag(o["ro"]);
     d.disk = disk.isEmpty() ? d.path : disk;
-    d.external = external || flag(o["rm"]) || o["tran"].toString() == "usb" || d.name.startsWith("mmcblk");
+    // Only the physical parent can establish external status. A partition's
+    // removable flag must never unlock an internal disk. Built-in eMMC also
+    // uses mmcblk names, so the name alone is not evidence of removability.
+    const QString transport = o["tran"].toString().toLower();
+    const bool internalTransport = QStringList{"ata","sata","sas","nvme","virtio"}.contains(transport);
+    d.external = disk.isEmpty()
+        ? d.type == "disk" && !internalTransport && (transport == "usb" || flag(o["rm"]))
+        : external;
     for (const auto &m : o["mountpoints"].toArray()) if (!m.isNull() && !m.toString().isEmpty()) d.mounts << m.toString();
     d.objectPath = objectName(d.name);
     d.locked = true;
@@ -85,8 +92,16 @@ DeviceList listDevices() {
     if (!r.ok()) return {{}, "Device discovery failed: " + r.error};
     return parseDevices(r.out.toUtf8());
 }
+QString deviceBlockReason(const Device &d) {
+    if (!d.external)
+        return "Internal or unverified drive: unmounting, ejecting, and erasing are prohibited.";
+    if (d.locked || d.readOnly)
+        return "This drive is protected: system, read-only, swap, or an unsupported device stack.";
+    return {};
+}
 QString formatBlockReason(const Device &d, const QVector<Device> &all) {
-    if (d.locked || !d.external || d.readOnly) return "This drive is protected: internal, system, read-only, swap, or an unsupported device stack.";
+    const QString protection = deviceBlockReason(d);
+    if (!protection.isEmpty()) return protection;
     // Whole-disk formatting is deliberately excluded; only existing partitions.
     if (d.type != "part") return "Select an existing partition. Partition-table creation is not supported in this release.";
     for (const auto &sibling : all) if (sibling.disk == d.disk && !sibling.mounts.isEmpty())
@@ -121,14 +136,20 @@ void DeviceService::mount(const Device &device, bool ro) {
          [this](bool ok,QString text){ emit finished(ok,text); });
 }
 void DeviceService::unmount(const Device &device) {
+    const QString protection = deviceBlockReason(device);
+    if (!protection.isEmpty()) { emit finished(false,protection); return; }
     QString error; auto d = refreshed(device,error);
-    if (!error.isEmpty() || d.locked || d.mounts.isEmpty()) {
+    if (error.isEmpty()) error = deviceBlockReason(d);
+    if (!error.isEmpty() || d.mounts.isEmpty()) {
         emit finished(false,error.isEmpty() ? "Select a mounted, unprotected external volume." : error); return;
     }
     auto w = new QFutureWatcher<CommandResult>(this);
     connect(w,&QFutureWatcher<CommandResult>::finished,this,[this,w,d] {
         auto r = w->result(); w->deleteLater();
         if (!r.ok()) { emit finished(false,"Sync failed: " + r.error); return; }
+        QString error; const auto current = refreshed(d,error);
+        if (error.isEmpty()) error = deviceBlockReason(current);
+        if (!error.isEmpty()) { emit finished(false,error); return; }
         call(d.objectPath,"org.freedesktop.UDisks2.Filesystem","Unmount",{QVariantMap{}},
              [this,d](bool ok,QString text) {
             if (!ok && !d.mounts.isEmpty()) {
@@ -141,41 +162,62 @@ void DeviceService::unmount(const Device &device) {
     });
     w->setFuture(QtConcurrent::run([] { return command("sync",{}); }));
 }
-void DeviceService::unmountSequence(QVector<Device> volumes, const QString &driveObject) {
+void DeviceService::unmountSequence(QVector<Device> volumes, const QString &driveObject, const Device &device) {
+    // Recheck after sync and between asynchronous unmounts, including the final
+    // power-off when there were no mounted partitions.
+    QString error; const auto current = refreshed(device,error);
+    if (error.isEmpty()) error = deviceBlockReason(current);
+    const auto list = listDevices();
+    if (error.isEmpty()) error = list.error;
+    for (const auto &v : list.items) {
+        if (error.isEmpty() && v.disk == current.disk) error = deviceBlockReason(v);
+    }
+    if (!error.isEmpty()) { emit finished(false,error); return; }
+    if (driveFor(current) != driveObject) {
+        emit finished(false,"The physical drive changed. Safe removal stopped."); return;
+    }
     if (volumes.isEmpty()) {
         call(driveObject,"org.freedesktop.UDisks2.Drive","PowerOff",{QVariantMap{}},
              [this](bool ok,QString text){ emit finished(ok,ok ? "Powered off. The drive can now be unplugged." : text); });
         return;
     }
     auto d = volumes.takeLast();
+    const auto volume = refreshed(d,error);
+    if (error.isEmpty()) error = deviceBlockReason(volume);
+    if (!error.isEmpty()) { emit finished(false,error); return; }
     call(d.objectPath,"org.freedesktop.UDisks2.Filesystem","Unmount",{QVariantMap{}},
-         [this,volumes,driveObject](bool ok,QString text) {
+         [this,volumes,driveObject,device](bool ok,QString text) {
         if (!ok) { emit finished(false,"Safe removal stopped: " + text + "\nClose files on this drive and retry."); return; }
-        unmountSequence(volumes,driveObject);
+        unmountSequence(volumes,driveObject,device);
     });
 }
 void DeviceService::safelyRemove(const Device &device) {
+    const QString protection = deviceBlockReason(device);
+    if (!protection.isEmpty()) { emit finished(false,protection); return; }
     QString error; auto d = refreshed(device,error);
-    if (!error.isEmpty() || d.locked) { emit finished(false,error.isEmpty() ? "Protected disk." : error); return; }
+    if (error.isEmpty()) error = deviceBlockReason(d);
+    if (!error.isEmpty()) { emit finished(false,error); return; }
     auto list = listDevices();
     if (!list.error.isEmpty()) { emit finished(false,list.error); return; }
     QVector<Device> volumes;
     for (const auto &v : list.items) if (v.disk == d.disk) {
-        if (v.locked) { emit finished(false,"A volume on this disk is protected."); return; }
+        if (!deviceBlockReason(v).isEmpty()) { emit finished(false,"A volume on this disk is protected."); return; }
         if (!v.mounts.isEmpty()) volumes << v;
     }
     const QString drive = driveFor(d);
     if (drive.isEmpty() || drive == "/") { emit finished(false,"UDisks2 cannot identify this drive."); return; }
     auto w = new QFutureWatcher<CommandResult>(this);
-    connect(w,&QFutureWatcher<CommandResult>::finished,this,[this,w,volumes,drive] {
+    connect(w,&QFutureWatcher<CommandResult>::finished,this,[this,w,volumes,drive,d] {
         auto r = w->result(); w->deleteLater();
         if (!r.ok()) { emit finished(false,"Sync failed: " + r.error); return; }
-        unmountSequence(volumes,drive);
+        unmountSequence(volumes,drive,d);
     });
     w->setFuture(QtConcurrent::run([]{ return command("sync",{}); }));
 }
 void DeviceService::format(const Device &device, const QString &fs, const QString &label,
                            bool zeroFill, const QString &confirmation) {
+    const QString protection = deviceBlockReason(device);
+    if (!protection.isEmpty()) { emit finished(false,protection); return; }
     auto list = listDevices(); QString error;
     auto d = refreshed(device,error);
     if (error.isEmpty()) error = list.error;

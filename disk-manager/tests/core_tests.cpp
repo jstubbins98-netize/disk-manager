@@ -39,6 +39,47 @@ int main(int argc,char **argv) {
     auto locked=dm::parseDevices(QJsonDocument(QJsonObject{{"blockdevices",QJsonArray{mounted}}}).toJson());
     require(locked.items[0].locked && locked.items[1].locked,"external system volume locks whole disk");
     require(!dm::parseDevices("not json").error.isEmpty(),"bad discovery fails closed");
+    // Never touch hardware: exercise discovery with synthetic device trees.
+    for (const auto &transport : {"sata","ata","nvme","sas","virtio","mmc",""}) {
+        auto internal = block("/dev/mmcblk0","disk",false,{},QJsonArray{
+            block("/dev/mmcblk0p1","part",true,"/mnt/data")});
+        internal["tran"] = transport;
+        auto internalPart = internal["children"].toArray()[0].toObject();
+        internalPart["tran"] = "usb"; // Child metadata cannot unlock the parent.
+        internal["children"] = QJsonArray{internalPart};
+        const auto devices = dm::parseDevices(QJsonDocument(QJsonObject{
+            {"blockdevices",QJsonArray{internal}}}).toJson());
+        require(devices.items.size()==2,"internal device fixture parsed");
+        for (const auto &device : devices.items) {
+            require(!device.external && device.locked,"internal non-system drive stays locked");
+            require(!dm::deviceBlockReason(device).isEmpty(),"internal unmount and eject refused");
+            require(!dm::formatBlockReason(device,devices.items).isEmpty(),"internal erase refused");
+        }
+    }
+    auto misleading = block("/dev/nvme0n1","disk",true); misleading["tran"]="nvme";
+    auto unknown = block("/dev/sdc","disk",false);
+    auto usbFixed = block("/dev/sdd","disk",false,{},QJsonArray{block("/dev/sdd1","part",false)});
+    usbFixed["tran"]="usb";
+    auto sd = block("/dev/mmcblk1","disk",true); sd["tran"]="mmc";
+    auto classified = dm::parseDevices(QJsonDocument(QJsonObject{{"blockdevices",
+        QJsonArray{misleading,unknown,usbFixed,sd}}}).toJson());
+    require(classified.items[0].locked && classified.items[1].locked,"internal transport and unknown drive fail closed");
+    require(!classified.items[2].locked && !classified.items[3].locked,"USB fixed disk and partition supported");
+    require(!classified.items[4].locked,"removable SD card supported");
+    dm::DeviceService service;
+    int refusals = 0;
+    QObject::connect(&service,&dm::DeviceService::finished,[&](bool ok,const QString &text) {
+        require(!ok && text.contains("prohibited"),"service explicitly refuses internal drive");
+        ++refusals;
+    });
+    dm::Device internal;
+    internal.path="/dev/this-is-a-synthetic-internal-drive"; internal.locked=false;
+    internal.readOnly=false; internal.mounts={"/mnt/data"};
+    service.unmount(internal);
+    service.safelyRemove(internal);
+    service.format(internal,"ext4","",false,"");
+    service.format(internal,"ext4","",true,"");
+    require(refusals==4,"unmount eject format and zero-fill rejected before discovery or D-Bus");
     QTemporaryDir temp;
     require(temp.isValid(),"temporary test directory");
     QDir d(temp.path()); d.mkpath("source/sub"); d.mkpath("source/node_modules"); d.mkpath("source/.local/share/Trash");

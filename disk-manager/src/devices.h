@@ -14,6 +14,7 @@ struct Device {
 struct DeviceList { QVector<Device> items; QString error; };
 DeviceList parseDevices(const QByteArray &json);
 DeviceList listDevices();
+QString deviceBlockReason(const Device &device);
 QString formatBlockReason(const Device &device, const QVector<Device> &all);
 
 class DeviceService : public QObject {
@@ -31,6 +32,6 @@ signals:
 private:
     void call(const QString &path, const QString &interface, const QString &method, const QVariantList &args,
               std::function<void(bool,QString)> done);
-    void unmountSequence(QVector<Device> volumes, const QString &driveObject);
+    void unmountSequence(QVector<Device> volumes, const QString &driveObject, const Device &device);
 };
 }

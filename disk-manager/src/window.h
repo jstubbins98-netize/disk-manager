@@ -80,6 +80,7 @@ private:
     Device selected() const;
     void formatSelected();
     void action(const QString &name);
+    void updateDeviceActions();
     QTreeWidget *devices_;
     QLabel *deviceStatus_;
     QWidget *deviceActions_;

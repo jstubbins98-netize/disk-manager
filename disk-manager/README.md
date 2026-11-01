@@ -148,6 +148,10 @@ your laptop's USB disks: build and run this application on that laptop.
 - Internal disks, system mounts, swap, read-only disks, and unsupported
   encrypted/LVM/RAID device stacks are protected. Protection applies to the
   whole physical disk when any of its volumes is protected.
+- Internal or unverified drives cannot be unmounted, ejected, formatted, or
+  zero-filled. The controls are disabled and the device service independently
+  refuses these operations. External status requires physical-parent USB or
+  removable-media evidence; an `mmcblk` name alone is not sufficient.
 
 **Formatting permanently erases data on the selected partition.** Zero-fill is
 not guaranteed secure sanitization of SSDs, flash, remapped sectors, or drives
@@ -317,6 +321,3 @@ For headless visual inspection of the actual Qt UI:
 
 The `offscreen` Qt platform plugin must be available. This captures the real
 native window, not a web mockup.
-
-## Licence
-license is MIT, see `LICENSE` file for details

@@ -65,6 +65,8 @@ Window::Window() {
     }
     buttons->addStretch();
     readOnly_ = new QCheckBox("Mount read-only"); buttons->addWidget(readOnly_);
+    connect(devices_,&QTreeWidget::currentItemChanged,this,[this]{ updateDeviceActions(); });
+    updateDeviceActions();
     layout->addWidget(deviceActions_);
     layout->addWidget(note("Formatting erases the selected partition permanently. It requires a typed confirmation and Linux authorization. Zero-fill is not a guaranteed secure erase on SSDs or flash storage."));
     pages->addWidget(devicePage);
@@ -100,6 +102,7 @@ void Window::refresh() {
             QString("%1 external drive(s) connected · %2 block devices discovered").arg(external).arg(list_.items.size())
             + (external == 0 ? "\nNo external drives detected. Connect a USB drive or SD card on the Linux computer running this app." : ""));
         deviceActions_->setEnabled(list_.error.isEmpty());
+        updateDeviceActions();
     });
     w->setFuture(QtConcurrent::run(listDevices));
 }
@@ -109,11 +112,28 @@ Device Window::selected() const {
     int index = item->data(0,Qt::UserRole).toInt();
     return index >= 0 && index < list_.items.size() ? list_.items[index] : Device{};
 }
+void Window::updateDeviceActions() {
+    const auto d = selected();
+    const QString protection = deviceBlockReason(d);
+    const bool allowed = !d.path.isEmpty() && list_.error.isEmpty() && protection.isEmpty();
+    for (auto button : deviceActions_->findChildren<QPushButton*>()) {
+        const QString name = button->text();
+        bool enabled = allowed;
+        if (name == "Health") enabled = !d.path.isEmpty();
+        else if (name == "Unmount") enabled = allowed && !d.mounts.isEmpty();
+        else if (name == "Mount") enabled = allowed && d.mounts.isEmpty() && !d.fs.isEmpty();
+        else if (name.startsWith("Format")) enabled = allowed && formatBlockReason(d,list_.items).isEmpty();
+        button->setEnabled(enabled);
+        button->setToolTip(name == "Health" ? QString{} : protection);
+    }
+}
 void Window::action(const QString &name) {
     if (deviceBusy_) return;
     const Device d = selected();
     if (d.path.isEmpty()) { message(this,false,"Select a drive or partition first."); return; }
     if (name == "Health") { message(this,true,service_.health(d)); return; }
+    const QString protection = deviceBlockReason(d);
+    if (!protection.isEmpty()) { message(this,false,protection); return; }
     if (name.startsWith("Format")) { formatSelected(); return; }
     if (name == "Safely remove" && QMessageBox::question(this,"Safely remove",
         "Unmount every volume on " + d.disk + " and power down this physical drive?") != QMessageBox::Yes) return;
