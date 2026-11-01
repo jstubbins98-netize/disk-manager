@@ -66,6 +66,35 @@ int main(int argc,char **argv) {
     require(classified.items[0].locked && classified.items[1].locked,"internal transport and unknown drive fail closed");
     require(!classified.items[2].locked && !classified.items[3].locked,"USB fixed disk and partition supported");
     require(!classified.items[4].locked,"removable SD card supported");
+    // Exercise listDevices itself, not just its parser: lsblk must be asked
+    // for a tree so USB partitions inherit their physical drive's transport.
+    QTemporaryDir discovery;
+    require(discovery.isValid(),"temporary discovery command directory");
+    auto usbMounted = usbFixed;
+    auto usbPartition = usbMounted["children"].toArray()[0].toObject();
+    usbPartition["mountpoints"] = QJsonArray{"/media/user/USB"};
+    usbPartition["tran"] = QJsonValue::Null;
+    usbMounted["children"] = QJsonArray{usbPartition};
+    const auto fixture = QJsonDocument(QJsonObject{{"blockdevices",
+        QJsonArray{root,usbMounted}}}).toJson(QJsonDocument::Compact);
+    const QString mockLsblk = discovery.filePath("lsblk");
+    put(mockLsblk, QByteArray("#!/bin/sh\nhas_tree=no\nfor arg in \"$@\"; do\n"
+        "  [ \"$arg\" != --tree ] || has_tree=yes\ndone\n"
+        "[ \"$has_tree\" = yes ] || exit 23\nprintf '%s\\n' '") + fixture + "'\n");
+    require(QFile::setPermissions(mockLsblk,QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner),
+        "mock discovery command executable");
+    const QByteArray originalPath = qgetenv("PATH");
+    qputenv("PATH",discovery.path().toUtf8() + ":" + originalPath);
+    const auto discovered = dm::listDevices();
+    qputenv("PATH",originalPath);
+    require(discovered.error.isEmpty() && discovered.items.size()==4,"discovery explicitly requests lsblk tree");
+    require(discovered.items[0].locked && discovered.items[1].locked,"discovery keeps internal drive protected");
+    require(!discovered.items[2].locked && !discovered.items[3].locked,"mounted fixed-media USB is not falsely locked");
+    require(discovered.items[3].disk=="/dev/sdd" && discovered.items[3].external,
+        "USB partition retains physical parent identity");
+    require(dm::deviceBlockReason(discovered.items[3]).isEmpty(),"mounted USB eligible for unmount and eject");
+    require(!dm::formatBlockReason(discovered.items[3],discovered.items).isEmpty(),
+        "mounted USB still requires unmount before formatting");
     dm::DeviceService service;
     int refusals = 0;
     QObject::connect(&service,&dm::DeviceService::finished,[&](bool ok,const QString &text) {

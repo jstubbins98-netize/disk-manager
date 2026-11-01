@@ -87,7 +87,10 @@ DeviceList parseDevices(const QByteArray &json) {
     return result;
 }
 DeviceList listDevices() {
-    auto r = command("lsblk", {"--json","--bytes","--paths","--output",
+    // JSON children are only guaranteed with NAME in the output or --tree.
+    // Without them, fixed-media USB partitions lose their parent's transport
+    // and are incorrectly classified as internal/unverified.
+    auto r = command("lsblk", {"--json","--tree","--bytes","--paths","--output",
         "PATH,KNAME,TYPE,SIZE,FSTYPE,LABEL,UUID,MOUNTPOINTS,RM,RO,TRAN,MODEL,SERIAL"});
     if (!r.ok()) return {{}, "Device discovery failed: " + r.error};
     return parseDevices(r.out.toUtf8());
