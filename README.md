@@ -323,4 +323,4 @@ The `offscreen` Qt platform plugin must be available. This captures the real
 native window, not a web mockup.
 
 ## Licence
-license is MIT, see `LICENSE` file for details
+license is MIT, see `LICENSE` file for details.
