@@ -1,0 +1,43 @@
+cmake_minimum_required(VERSION 3.20)
+project(DiskManager VERSION 0.4.0 LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_AUTOMOC ON)
+# Nix separates OpenGL headers and libraries into different outputs. Discover
+# both through pkg-config without embedding machine-specific store paths.
+find_package(PkgConfig QUIET)
+if(PkgConfig_FOUND)
+  pkg_check_modules(GL QUIET gl)
+  if(GL_FOUND)
+    list(APPEND CMAKE_INCLUDE_PATH ${GL_INCLUDE_DIRS})
+    list(APPEND CMAKE_LIBRARY_PATH ${GL_LIBRARY_DIRS})
+  endif()
+endif()
+find_package(Qt6 6.4 REQUIRED COMPONENTS Core Widgets Concurrent DBus)
+add_library(diskmanager-core src/common.cpp src/devices.cpp src/scanner.cpp src/backup.cpp)
+target_include_directories(diskmanager-core PUBLIC src)
+target_link_libraries(diskmanager-core PUBLIC Qt6::Core Qt6::Concurrent Qt6::DBus)
+target_compile_options(diskmanager-core PRIVATE -Wall -Wextra -Wpedantic)
+add_executable(diskmgr src/main.cpp src/window.cpp src/spacepage.cpp src/backuppage.cpp)
+target_link_libraries(diskmgr PRIVATE diskmanager-core Qt6::Widgets)
+target_compile_options(diskmgr PRIVATE -Wall -Wextra -Wpedantic)
+include(CTest)
+if(BUILD_TESTING)
+  add_executable(core-tests tests/core_tests.cpp)
+  target_link_libraries(core-tests PRIVATE diskmanager-core)
+  add_test(NAME core-safety COMMAND core-tests)
+  find_program(BASH_EXECUTABLE bash)
+  if(BASH_EXECUTABLE)
+    add_test(NAME build-script-safety
+      COMMAND ${BASH_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/build_script_tests.sh)
+  endif()
+endif()
+include(GNUInstallDirs)
+install(TARGETS diskmgr
+  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT Runtime)
+install(FILES resources/io.diskmanager.desktop
+  DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/applications COMPONENT Runtime)
+install(FILES logo/io.diskmanager.png
+  DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/512x512/apps COMPONENT Runtime)
+install(FILES README.md
+  DESTINATION ${CMAKE_INSTALL_DOCDIR} COMPONENT Runtime)

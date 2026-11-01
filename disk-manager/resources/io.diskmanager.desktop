@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Disk Manager
+Comment=Your drives, your space, and your backups
+Exec=diskmgr
+Icon=io.diskmanager
+Terminal=false
+Categories=System;Utility;
+Keywords=disk;storage;backup;space;usb;
